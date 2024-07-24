@@ -185,6 +185,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Input tokens and positions.
         input_tokens: List[List[int]] = field(default_factory=list)
         input_positions: List[List[int]] = field(default_factory=list)
+        mrope_input_positions: Optional[List[List[List[int]]]] = None
 
         # The sequence length (may be capped to the sliding window).
         seq_lens: List[int] = field(default_factory=list)
@@ -315,6 +316,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.query_lens[
             seq_idx] = seq_len - context_len if inter_data.is_prompt else 1
 
+        if hasattr(seq_data, '_mrope_position_delta'):
+            if inter_data.mrope_input_positions is None:
+                inter_data.mrope_input_positions = [None] * inter_data.n_seqs
+
+            from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+
+            delta = getattr(seq_data, '_mrope_position_delta')
+            inter_data.mrope_input_positions[seq_idx] = MRotaryEmbedding.get_next_input_positions(
+                delta, context_len, seq_len,
+            )
+
     def _compute_for_prefix_cache_hit(
             self, inter_data: InterDataForSeqGroup, seq_idx: int,
             seq_group_metadata: SequenceGroupMetadata):
@@ -433,6 +445,34 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         mm_kwargs = self.multi_modal_input_mapper(mm_data)
         inter_data.multi_modal_inputs = mm_kwargs
 
+        # special processing for mrope position deltas.
+        # mrope requires keep "rope_deltas" between prompt and decoding phases.
+        _rope_scaling = getattr(self.runner.model_config.hf_config, "rope_scaling", {})
+        _is_mrope = _rope_scaling.get("type", None) == "mrope"
+        if _is_mrope:
+            vision_grid_thw = mm_kwargs.get("vision_grid_thw", None)
+            assert vision_grid_thw is not None, \
+                "mrope embedding type requires multi-modal input mapper returns 'vision_grid_thw'."
+
+            hf_config = self.runner.model_config.hf_config
+
+            from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+
+            inter_data.mrope_input_positions = [None] * inter_data.n_seqs
+            for seq_idx in range(inter_data.n_seqs):
+                seq_data = seq_group_metadata.seq_data[inter_data.seq_ids[seq_idx]]
+                token_ids = seq_data.get_token_ids()
+
+                mrope_input_positions, mrope_position_delta = MRotaryEmbedding.get_input_positions(
+                    token_ids, vision_grid_thw,
+                    vision_token_id=hf_config.vision_token_id,
+                    spatial_merge_size=hf_config.vision_config["spatial_merge_size"],
+                    context_len=inter_data.context_lens[seq_idx],
+                )
+
+                setattr(seq_data, '_mrope_position_delta', mrope_position_delta)
+                inter_data.mrope_input_positions[seq_idx] = mrope_input_positions
+
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
         seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -470,10 +510,22 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # This may happen when all prefill requests hit
             # prefix caching and there is no decode request.
             return self.model_input_cls()
-        input_positions = flatten_2d_lists([
-            flatten_2d_lists(inter_data.input_positions)
-            for inter_data in self.inter_data_list
-        ])
+
+        mrope_input_positions = None
+        if any(inter_data.mrope_input_positions is not None for inter_data in self.inter_data_list):
+            assert all(inter_data.mrope_input_positions is not None for inter_data in self.inter_data_list)
+            mrope_input_positions = [[] for _ in range(3)]
+            for idx in range(3):
+                for inter_data in self.inter_data_list:
+                    for _inter_mrope in inter_data.mrope_input_positions:
+                        mrope_input_positions[idx].extend(_inter_mrope[idx])
+            input_positions = None
+        else:
+            input_positions = flatten_2d_lists([
+                flatten_2d_lists(inter_data.input_positions)
+                for inter_data in self.inter_data_list
+            ])
+
         seq_lens = []
         max_decode_seq_len = 0
         for inter_data in self.inter_data_list:
@@ -508,13 +560,20 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Tokens and positions.
         input_tokens.extend([0] * cuda_graph_pad_size)
-        input_positions.extend([0] * cuda_graph_pad_size)
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.runner.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.runner.device)
+        if mrope_input_positions is not None:
+            for idx in range(3):
+                mrope_input_positions[idx].extend([0] * cuda_graph_pad_size)
+            input_positions_tensor = torch.tensor(mrope_input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.runner.device)
+        else:
+            input_positions.extend([0] * cuda_graph_pad_size)
+            input_positions_tensor = torch.tensor(input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.runner.device)
 
         # Sequence and query lengths.
         seq_lens.extend([1] * cuda_graph_pad_size)

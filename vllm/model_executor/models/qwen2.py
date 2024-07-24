@@ -249,8 +249,13 @@ class Qwen2Model(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        if input_ids is not None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            assert inputs_embeds is not None
+            hidden_states = inputs_embeds
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
