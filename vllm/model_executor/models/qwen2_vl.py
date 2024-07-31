@@ -625,7 +625,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsVision):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> SamplerOutput:
-        flatten_pixel_values: torch.Tensor = kwargs.get('flatten_pixel_values', None)
+        pixel_values: torch.Tensor = kwargs.get('pixel_values', None)
         vision_grid_thw: torch.Tensor = kwargs.get('vision_grid_thw', None)
 
         seq_len = input_ids.size(-1)
@@ -634,10 +634,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsVision):
             assert positions.ndim == 2 and positions.size(0) == 3 and positions.size(1) == seq_len, \
                 f"multimodal section rotary embedding requires (3, seq_len) positions, but got {positions.size()}"
 
-        if flatten_pixel_values is not None and flatten_pixel_values.size(0) > 0:
+        if pixel_values is not None and pixel_values.size(0) > 0:
             # compute visual embeddings
-            flatten_pixel_values = flatten_pixel_values.type(self.visual.get_dtype())
-            image_embeds = self.visual(flatten_pixel_values, vision_grid_thw)
+            pixel_values = pixel_values.type(self.visual.get_dtype())
+            image_embeds = self.visual(pixel_values, vision_grid_thw)
 
             # compute llm embeddings
             inputs_embeds = self.model.embed_tokens(input_ids)
