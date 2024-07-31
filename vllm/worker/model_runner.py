@@ -483,10 +483,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.multi_modal_inputs = mm_kwargs
 
         # special processing for mrope position deltas.
-        # mrope requires keep "rope_deltas" between prompt and decoding phases.
-        _rope_scaling = getattr(self.runner.model_config.hf_config, "rope_scaling", {})
-        _is_mrope = _rope_scaling.get("type", None) == "mrope"
-        if _is_mrope:
+        if self.runner.model_is_mrope:
             vision_grid_thw = mm_kwargs.get("vision_grid_thw", None)
             assert vision_grid_thw is not None, \
                 "mrope embedding type requires multi-modal input mapper returns 'vision_grid_thw'."
@@ -1062,6 +1059,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.list_adapters()
 
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+        return rope_scaling.get("type", None) == "mrope"
+
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
         """Cuda graph capture a model.
@@ -1092,6 +1096,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        if self.model_is_mrope:
+            input_positions = torch.tile(input_positions, (3, 1))
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
@@ -1244,7 +1250,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "input_ids":
                         input_tokens[:batch_size],
                         "positions":
-                        input_positions[:batch_size],
+                        input_positions[..., :batch_size],
                         "hidden_or_intermediate_states":
                         hidden_or_intermediate_states[
                             virtual_engine]  # type: ignore

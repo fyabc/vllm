@@ -631,7 +631,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsVision):
         seq_len = input_ids.size(-1)
 
         if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
-            assert positions.ndim == 2 and positions.size(0) == 3 and positions.size(1) == seq_len, \
+            assert positions.ndim == 2 and positions.size(0) == 3, \
                 f"multimodal section rotary embedding requires (3, seq_len) positions, but got {positions.size()}"
 
         if pixel_values is not None and pixel_values.size(0) > 0:
