@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 import math
+from collections.abc import Mapping
 from functools import partial, lru_cache
 from typing import Tuple, Optional, List, Iterable, Any, Dict, Union
 
@@ -31,9 +32,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from einops import rearrange, repeat
-from transformers import Qwen2VLConfig
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm.attention import AttentionMetadata
 from vllm.config import MultiModalConfig, CacheConfig
@@ -55,6 +53,10 @@ from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.sequence import SequenceData, SamplerOutput, IntermediateTensors
+
+from transformers import Qwen2VLConfig
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
@@ -483,27 +485,10 @@ MAX_TEMPORAL_IMAGE_NUM = 10
 
 def input_mapper_for_qwen2_vl(
     ctx: InputContext,
-    multi_modal_data: Union[Image.Image, List[Image.Image]],
+    processed_vision_inputs: dict[str, Any],
 ) -> MultiModalInputs:
-    """Input mapper for Qwen2-VL.
-
-    Notes:
-        This input mapper support multiple images (passed by a List[PIL.Image]).
-    """
-    processor = cached_get_processor(ctx.model_config.model)
-    image_processor = processor.image_processor
-    if image_processor is None:
-        raise RuntimeError("No HuggingFace processor is available "
-                           "to process the image object")
-    try:
-        batch_data = image_processor \
-            .preprocess(multi_modal_data, return_tensors="pt") \
-            .data
-    except Exception:
-        logger.error("Failed to process image (%s)", multi_modal_data)
-        raise
-
-    return MultiModalInputs(batch_data)
+    """Input mapper for Qwen2-VL. Do nothing since all preprocessing steps already done in input_processor."""
+    return MultiModalInputs(processed_vision_inputs)
 
 
 def _get_max_image_info(image_processor):
@@ -537,31 +522,64 @@ def dummy_data_for_qwen2_vl(ctx: InputContext, seq_len: int) -> Tuple[SequenceDa
     dummy_seqdata = SequenceData(token_ids)
     dummy_image = Image.new("RGB", (max_resized_width, max_resized_height), color=0)
 
-    return dummy_seqdata, {"image": [dummy_image] * MAX_TEMPORAL_IMAGE_NUM}
+    processed_vision_inputs = image_processor(
+        [dummy_image] * MAX_TEMPORAL_IMAGE_NUM,
+        vision_infos=None,
+        return_tensors="pt",
+    )
+
+    return dummy_seqdata, {"image": processed_vision_inputs}
 
 
 def input_processor_for_qwen2_vl(ctx: InputContext, llm_inputs: LLMInputs) -> LLMInputs:
+    # TODO: Refactor code, support multiple type of vision inputs:
+    # - str / list[str]: vision url or url list.
+    # - PIL.Image / list[PIL.Image]: image object or object list.
+    # - dict[str, Any]: image object + parsed vision infos
+    #   keys:
+    #   - image_objects: list[PIL.Image]
+    #   - vision_infos: list[dict]
+
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
-    vision_pixel_inputs = multi_modal_data['image']
-    if not vision_pixel_inputs:
-        return llm_inputs
+    vision_inputs = multi_modal_data['image']
+
+    if isinstance(vision_inputs, Mapping):
+        # dict: image_objects + extra vision_infos
+        vision_infos = vision_inputs['vision_infos']
+        image_objects = vision_inputs['image_objects']
+    else:
+        # image_object or list of image_objects
+        vision_infos = None
+        image_objects = vision_inputs
+
+    if not image_objects:
+        return LLMInputs(
+            prompt_token_ids=llm_inputs['prompt_token_ids'],
+            prompt=llm_inputs['prompt'],
+            multi_modal_data=None,
+        )
 
     processor = cached_get_processor(ctx.model_config.model)
     image_processor = processor.image_processor
     vision_token_id = image_processor.vision_token_id
 
-    vision_inputs = image_processor(vision_pixel_inputs, vision_infos=None, return_tensors="pt")
-    vision_grid_thw = vision_inputs['vision_grid_thw']
+    try:
+        processed_vision_inputs = image_processor(image_objects, vision_infos=vision_infos, return_tensors="pt")
+    except IndexError:
+        # TODO: Remove this debug information for video tasks.
+        print(f'[FY DEBUG] Failed to parse {image_objects=} {vision_infos=}')
+        raise
+    vision_grid_thw = processed_vision_inputs['vision_grid_thw']
 
     input_ids = llm_inputs['prompt_token_ids']
 
     new_input_ids = []
     img_num = input_ids.count(vision_token_id)
     assert len(vision_grid_thw) == img_num, \
-        f'The text input contains {img_num} image tokens, but {len(vision_grid_thw)} images provided'
+        f'The text input contains {img_num} image tokens, but {len(vision_grid_thw)} image_objects provided'
     start = 0
     for image_idx in range(img_num):
         end = input_ids.index(vision_token_id, start)
@@ -580,7 +598,7 @@ def input_processor_for_qwen2_vl(ctx: InputContext, llm_inputs: LLMInputs) -> LL
     return LLMInputs(
         prompt_token_ids=new_input_ids,
         prompt=llm_inputs['prompt'],
-        multi_modal_data=multi_modal_data,
+        multi_modal_data={'image': processed_vision_inputs} if img_num > 0 else None,
     )
 
 
@@ -628,13 +646,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsVision):
         pixel_values: torch.Tensor = kwargs.get('pixel_values', None)
         vision_grid_thw: torch.Tensor = kwargs.get('vision_grid_thw', None)
 
-        seq_len = input_ids.size(-1)
+        _include_vision = pixel_values is not None and pixel_values.size(0) > 0
 
-        if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
-            assert positions.ndim == 2 and positions.size(0) == 3, \
-                f"multimodal section rotary embedding requires (3, seq_len) positions, but got {positions.size()}"
+        if _include_vision:
+            if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
+                assert positions.ndim == 2 and positions.size(0) == 3, \
+                    f"multimodal section rotary embedding requires (3, seq_len) positions, but got {positions.size()}"
 
-        if pixel_values is not None and pixel_values.size(0) > 0:
             # compute visual embeddings
             pixel_values = pixel_values.type(self.visual.get_dtype())
             image_embeds = self.visual(pixel_values, vision_grid_thw)
