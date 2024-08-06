@@ -1,7 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
-#include "registration.h"
+#include "core/registration.h"
 
 #include <torch/library.h>
 
@@ -145,9 +145,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("awq_marlin_repack", &awq_marlin_repack);
   ops.impl("awq_marlin_repack", torch::kCUDA, &awq_marlin_repack);
 
+  // Dequantization for GGML.
+  ops.def("ggml_dequantize", &ggml_dequantize);
+  ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
+
+  // mmvq kernel for GGML.
+  ops.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8);
+  ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
+
+  // mmq kernel for GGML.
+  ops.def("ggml_mul_mat_a8", &ggml_mul_mat_a8);
+  ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
+
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
+
+  // marlin_qqq_gemm for QQQ.
+  ops.def("marlin_qqq_gemm", &marlin_qqq_gemm);
+  ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
