@@ -554,12 +554,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         mrope_input_positions = None
         if any(inter_data.mrope_input_positions is not None for inter_data in self.inter_data_list):
-            assert all(inter_data.mrope_input_positions is not None for inter_data in self.inter_data_list)
             mrope_input_positions = [[] for _ in range(3)]
             for idx in range(3):
                 for inter_data in self.inter_data_list:
-                    for _inter_mrope in inter_data.mrope_input_positions:
-                        mrope_input_positions[idx].extend(_inter_mrope[idx])
+                    if inter_data.mrope_input_positions is None:
+                        for _seq_input_positions in inter_data.input_positions:
+                            mrope_input_positions[idx].extend(_seq_input_positions)
+                    else:
+                        for _seq_mrope_input_positions in inter_data.mrope_input_positions:
+                            mrope_input_positions[idx].extend(_seq_mrope_input_positions[idx])
             input_positions = None
         else:
             input_positions = flatten_2d_lists([
