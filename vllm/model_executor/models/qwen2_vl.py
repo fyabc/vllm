@@ -491,7 +491,7 @@ MAX_TEMPORAL_IMAGE_NUM = 10
 
 def input_mapper_for_qwen2_vl(
     ctx: InputContext,
-    processed_vision_inputs: dict[str, Any],
+    processed_vision_inputs: Dict[str, Any],
 ) -> MultiModalInputs:
     """Input mapper for Qwen2-VL. Do nothing since all preprocessing steps already done in input_processor."""
     return MultiModalInputs(processed_vision_inputs)
