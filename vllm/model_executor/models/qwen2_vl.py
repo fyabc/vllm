@@ -25,7 +25,7 @@
 import math
 from collections.abc import Mapping
 from functools import partial, lru_cache
-from typing import Tuple, Optional, List, Iterable, Any, Dict, Union
+from typing import Tuple, Optional, List, Iterable, Any, Dict, Type
 
 import torch
 import torch.nn as nn
@@ -83,7 +83,7 @@ class Qwen2VisionMLP(nn.Module):
         self,
         in_features: int,
         hidden_features: int = None,
-        act_layer: nn.Module = QuickGELU,
+        act_layer: Type[nn.Module] = QuickGELU,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -192,8 +192,8 @@ class Qwen2VisionBlock(nn.Module):
         dim: int,
         num_heads: int,
         mlp_ratio: float,
-        act_layer: nn.Module = QuickGELU,
-        norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),
+        act_layer: Type[nn.Module] = QuickGELU,
+        norm_layer: Type[nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -245,12 +245,13 @@ class Qwen2VisionPatchMerger(nn.Module):
         self,
         d_model: int,
         context_dim: int,
+        norm_layer: Type[nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         spatial_merge_size: int = 2,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size ** 2)
-        self.ln_q = nn.LayerNorm(context_dim, eps=1e-6)
+        self.ln_q = norm_layer(context_dim)
         self.mlp = nn.ModuleList([
             ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=True, quant_config=quant_config),
             nn.GELU(),
@@ -302,9 +303,8 @@ class Qwen2VisionTransformer(nn.Module):
     def __init__(
         self,
         vision_config: Dict[str, Any],
-        norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),
+        norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
-        **__unused_kwargs,
     ) -> None:
         super().__init__()
 
@@ -330,6 +330,7 @@ class Qwen2VisionTransformer(nn.Module):
             embed_dim=embed_dim,
         )
 
+        norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         if pos_type == 'abs':
             num_patches = (img_size // patch_size) ** 2
             self.pos_embed = nn.Parameter(torch.zeros(num_patches, embed_dim))
@@ -352,7 +353,12 @@ class Qwen2VisionTransformer(nn.Module):
                 for _ in range(depth)
             ]
         )
-        self.merger = Qwen2VisionPatchMerger(d_model=hidden_size, context_dim=embed_dim, quant_config=quant_config)
+        self.merger = Qwen2VisionPatchMerger(
+            d_model=hidden_size,
+            context_dim=embed_dim,
+            norm_layer=norm_layer,
+            quant_config=quant_config,
+        )
 
     def get_dtype(self) -> torch.dtype:
         return self.blocks[0].mlp.fc2.weight.dtype
@@ -619,6 +625,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsVision):
 
         self.visual = Qwen2VisionTransformer(
             config.vision_config,
+            norm_eps=getattr(config, 'rms_norm_eps', 1e-6),
             quant_config=quant_config,
         )
 
