@@ -56,7 +56,7 @@ from vllm.sequence import SequenceData, SamplerOutput, IntermediateTensors
 
 from transformers import Qwen2VLConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from flash_attn.flash_attn_interface import flash_attn_varlen_func
+from vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
@@ -729,6 +729,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsVision):
                     loaded_weight = loaded_weight.view(3, visual_num_heads, head_size, visual_embed_dim)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, visual_embed_dim)
+                elif "visual" in name and "qkv.bias" in name:
+                    visual_num_heads = self.config.vision_config["num_heads"]
+                    visual_embed_dim = self.config.vision_config["embed_dim"]
+                    head_size = visual_embed_dim // visual_num_heads
+                    loaded_weight = loaded_weight.view(3, visual_num_heads, head_size)
+                    loaded_weight = loaded_weight.transpose(0, 1)
+                    loaded_weight = loaded_weight.reshape(-1)
                 param = params_dict[name]
 
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
