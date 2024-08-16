@@ -56,7 +56,8 @@ from vllm.sequence import SequenceData, SamplerOutput, IntermediateTensors
 
 from transformers import Qwen2VLConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+# from vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+from flash_attn import flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
